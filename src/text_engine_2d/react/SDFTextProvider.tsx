@@ -137,10 +137,6 @@ export function SDFTextProvider({
 }: PropsWithChildren<{ fontPathRegular: ISDFFont; fontPathBold?: ISDFFont }>) {
   useMemo(registerTextEngineToR3F, [])
 
-  React.useEffect(() => {
-    console.log('Hello, World! This is a SABO fork of thomas engine.')
-  }, [])
-
   const atlas = useTexture(fontPathRegular.sdfPath)
   const font = useLoader(FontLoader, fontPathRegular.fontPath) as Font
   const atlasBold = useTexture(fontPathBold ? fontPathBold.sdfPath : [])
