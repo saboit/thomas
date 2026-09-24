@@ -1,25 +1,29 @@
 {
-  "name": "thomas",
+  "name": "@saboit-dev/thomas",
   "version": "0.0.0-semantic-release",
   "private": true,
   "description": "",
   "keywords": [],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/buildwithflux/thomas"
+    "url": "git+https://github.com/saboit/thomas"
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/buildwithflux/thomas/issues"
+    "url": "https://github.com/saboit/thomas/issues"
   },
-  "homepage": "https://github.com/buildwithflux/thomas",
+  "homepage": "https://github.com/saboit/thomas",
+  "author": "Giulio Zausa (https://github.com/giulioz)",
   "maintainers": [
-    "Giulio Zausa (https://github.com/giulioz)"
+    "Nikita Evstigneev (https://github.com/evstinik)"
   ],
   "main": "index.cjs.js",
   "module": "index.js",
   "types": "index.d.ts",
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "commitlint": {
     "extends": [
       "@commitlint/config-conventional"

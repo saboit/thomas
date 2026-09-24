@@ -1,11 +1,13 @@
 # thomas
 
+This project is a fork of Thomas by Flux (original author Giulio Zausa), originally released under the MIT License.
+
 <img src="./docs/logo.png" width="175px" />
 
 thomas is an high-performance 2D/3D text rendering engine for [react-three-fiber](https://github.com/pmndrs/react-three-fiber). It can leverage instancing, vertex pulling and multichannel signed distance fields to render hundreds of thousands of characters with a single draw call, without compromising performance. It offers an easy-to-use React-friendly API.
 
 ```bash
-npm install thomas
+npm install @saboit-dev/thomas
 ```
 
 Try our [demo here](https://thomas-the-text-engine.netlify.app)!
