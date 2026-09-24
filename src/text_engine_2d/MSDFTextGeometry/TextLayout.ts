@@ -338,63 +338,64 @@ function createLayout(text: string, options: OptionsWithoutText) {
   return new TextLayout(text, options)
 }
 
+/** Glyph ids are code points, so a kerning pair packs into one number. */
+const KERNING_STRIDE = 0x110000
+
+type FontIndex = { glyphs: Map<number, any>; kernings: Map<number, number> }
+
+const fontIndexes = new WeakMap<object, FontIndex>()
+
+/**
+ * Index a font's glyphs and kerning pairs once.
+ *
+ * The layout looks up every character and every adjacent pair. A linear scan over a few thousand
+ * kerning pairs made that the hottest loop of the engine. The index assumes that font data does
+ * not change after it is loaded.
+ */
+function indexFont(font: any): FontIndex {
+  let index = fontIndexes.get(font)
+  if (index) return index
+
+  index = { glyphs: new Map(), kernings: new Map() }
+  // The first entry wins, as it did with the linear scan
+  for (const glyph of font.chars ?? []) {
+    if (!index.glyphs.has(glyph.id)) index.glyphs.set(glyph.id, glyph)
+  }
+  for (const kern of font.kernings ?? []) {
+    const pair = kern.first * KERNING_STRIDE + kern.second
+    if (!index.kernings.has(pair)) index.kernings.set(pair, kern.amount)
+  }
+  fontIndexes.set(font, index)
+  return index
+}
+
 function getGlyphById(font: any, id: number) {
-  if (!font.chars || font.chars.length === 0) {
-    return null
+  return indexFont(font).glyphs.get(id) ?? null
+}
+
+function getFirstGlyph(font: any, chars: string[]) {
+  const { glyphs } = indexFont(font)
+  for (const char of chars) {
+    const glyph = glyphs.get(char.charCodeAt(0))
+    if (glyph) return glyph
   }
-
-  const glyphIdx = findChar(font.chars, id)
-
-  if (glyphIdx >= 0) {
-    const glyph = font.chars[glyphIdx]
-    return glyph
-  }
-
   return null
 }
 
 function getXHeight(font: any) {
-  for (const id of X_HEIGHTS) {
-    const idx = findChar(font.chars, id.charCodeAt(0))
-    if (idx >= 0) {
-      return font.chars[idx].height
-    }
-  }
-  return 0
+  return getFirstGlyph(font, X_HEIGHTS)?.height ?? 0
 }
 
 function getMGlyph(font: any) {
-  for (const id of M_WIDTHS) {
-    const idx = findChar(font.chars, id.charCodeAt(0))
-    if (idx >= 0) {
-      return font.chars[idx]
-    }
-  }
-  return 0
+  return getFirstGlyph(font, M_WIDTHS) ?? 0
 }
 
 function getCapHeight(font: any) {
-  for (const id of CAP_HEIGHTS) {
-    const idx = findChar(font.chars, id.charCodeAt(0))
-    if (idx >= 0) {
-      return font.chars[idx].height
-    }
-  }
-  return 0
+  return getFirstGlyph(font, CAP_HEIGHTS)?.height ?? 0
 }
 
 function getKerning(font: any, left: number, right: number) {
-  if (!font.kernings || font.kernings.length === 0) {
-    return 0
-  }
-
-  const table = font.kernings
-  for (const kern of table) {
-    if (kern.first === left && kern.second === right) {
-      return kern.amount
-    }
-  }
-  return 0
+  return indexFont(font).kernings.get(left * KERNING_STRIDE + right) ?? 0
 }
 
 function getAlignType(align?: string) {
@@ -404,16 +405,6 @@ function getAlignType(align?: string) {
     return ALIGN_RIGHT
   }
   return ALIGN_LEFT
-}
-
-function findChar(array: { id: number }[], value: number, start?: number) {
-  start = start || 0
-  for (let i = start; i < array.length; i++) {
-    if (array[i].id === value) {
-      return i
-    }
-  }
-  return -1
 }
 
 function number(num: unknown, def: unknown) {

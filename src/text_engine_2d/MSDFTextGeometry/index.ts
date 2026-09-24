@@ -54,15 +54,65 @@ const pointB = new Vector3()
 const pointC = new Vector3()
 const pointD = new Vector3()
 
+/**
+ * The options that decide how one instance looks.
+ *
+ * Instances with equal values share a layout and its vertices, so the cache is keyed on them. An
+ * option that changes the layout but is missing here makes the cache return a stale layout.
+ * `alignY` and `yShift` do not move glyphs, but consumers read them from `_layouts[i]._options`.
+ */
+const LAYOUT_KEYS = ['text', 'width', 'lineHeight', 'letterSpacing', 'alignX', 'alignY', 'yShift', 'tabSize'] as const
+
+/**
+ * How many unused instances the cache keeps.
+ *
+ * A drag removes and adds the same labels many times, so an unused instance is likely to come back.
+ */
+const CACHE_HEADROOM = 256
+
+type LayoutOptions = Omit<IOptions, 'texts'> & IInstance
+
+interface ICachedInstance {
+  layout: TextLayout
+  glyphCount: number
+  positions: Float32Array
+  centers: Float32Array
+  uvs: Float32Array
+}
+
+function signatureOf(options: LayoutOptions) {
+  return JSON.stringify(LAYOUT_KEYS.map((key) => options[key]))
+}
+
+function layOut(options: LayoutOptions, texWidth: number, texHeight: number, flipY: boolean): ICachedInstance {
+  const layout = createLayout(options.text, options)
+  // A glyph with no area draws nothing
+  const glyphs = layout.glyphs.filter(({ data }) => data.width * data.height > 0)
+  return { layout, glyphCount: glyphs.length, ...generateAttributes(glyphs, texWidth, texHeight, flipY) }
+}
+
 export default class MSDFTextGeometry extends BufferGeometry {
   _layouts: TextLayout[]
 
   originalPositionsArray: Float32Array = new Float32Array()
   positionsArray: Float32Array = new Float32Array()
+  centersArray: Float32Array = new Float32Array()
+  uvsArray: Float32Array = new Float32Array()
   positionsAttribute: BufferAttribute | null = null
 
   instancesOffsetsCache: number[] = []
   instancesLengthsCache: number[] = []
+
+  /** Laid-out instances by signature, in least-recently-used order. */
+  private cache = new Map<string, ICachedInstance>()
+  private cacheFont: any = null
+  private cacheFlipY = true
+  /** The signatures of the last update. `null` makes the next update run. */
+  private signature: string | null = null
+  /** `-1` makes the first update build the index and the attributes, also for zero glyphs. */
+  private glyphsTotal = -1
+  /** The last matrix written per instance. */
+  private appliedTransforms: Matrix4[] = []
 
   constructor(options: IOptions) {
     super()
@@ -72,9 +122,20 @@ export default class MSDFTextGeometry extends BufferGeometry {
     this.update(options)
   }
 
+  /**
+   * Write the glyph positions of one instance. Returns whether anything was written.
+   *
+   * Consumers call this for every instance on every frame, and most instances do not move. A write
+   * marks the whole shared buffer for upload to the GPU, so an unchanged matrix is skipped.
+   */
   setTransform(transform: Matrix4, instance = 0) {
     const instanceOffset = this.instancesOffsetsCache[instance]
     const instanceLength = this.instancesLengthsCache[instance]
+    const applied = this.appliedTransforms[instance]
+
+    if (instanceLength === undefined || applied?.equals(transform)) {
+      return false
+    }
 
     for (let i = 0; i < instanceLength; i++) {
       const instanceGlyphOffset = instanceOffset * 12 + i * 12
@@ -111,80 +172,111 @@ export default class MSDFTextGeometry extends BufferGeometry {
       this.positionsArray[instanceGlyphOffset + 11] = pointD.z
     }
 
+    // Callers reuse one matrix for all instances, so keep a copy
+    this.appliedTransforms[instance] = (applied ?? new Matrix4()).copy(transform)
+
     if (this.positionsAttribute) {
       this.positionsAttribute.needsUpdate = true
     }
+    return true
   }
 
   update(options: IOptions) {
     const { texts, ...optionsWithoutTexts } = options
 
-    this._layouts = texts.map((txt) => createLayout(txt.text, { ...optionsWithoutTexts, ...txt }))
+    // the desired BMFont data
+    const font = options.font
 
     // get vec2 texcoords
     const flipY = options.flipY !== false
 
-    // the desired BMFont data
-    const font = options.font
+    // A cached layout belongs to the font and the atlas orientation that produced it
+    if (font !== this.cacheFont || flipY !== this.cacheFlipY) {
+      this.cache.clear()
+      this.cacheFont = font
+      this.cacheFlipY = flipY
+      this.signature = null
+    }
+
+    const instancesOptions = texts.map((txt) => ({ ...optionsWithoutTexts, ...txt }))
+    const signatures = instancesOptions.map(signatureOf)
+
+    // Consumers call update on every insert and remove, far more often than the content changes
+    const signature = signatures.join('\n')
+    if (signature === this.signature) {
+      return
+    }
+    this.signature = signature
 
     // determine texture size from font file
     const texWidth = font.common.scaleW
     const texHeight = font.common.scaleH
 
-    const glyphs = this._layouts.map((lay) =>
-      lay.glyphs.filter((glyph) => {
-        const bitmap = glyph.data
-        return bitmap.width * bitmap.height > 0
-      })
-    )
+    const instances = instancesOptions.map((instanceOptions, i) => {
+      const key = signatures[i]
+      const instance = this.cache.get(key) ?? layOut(instanceOptions, texWidth, texHeight, flipY)
+      // Re-insert, so the instances in use move to the end of the map
+      this.cache.delete(key)
+      this.cache.set(key, instance)
+      return instance
+    })
+
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= texts.length + CACHE_HEADROOM) break
+      this.cache.delete(key)
+    }
+
+    this._layouts = instances.map((instance) => instance.layout)
 
     // Keep a cache of each text instance offset and length for attributes
     this.instancesOffsetsCache = []
     this.instancesLengthsCache = []
     let offsetSoFar = 0
-    glyphs.forEach((t, i) => {
-      this.instancesLengthsCache[i] = t.length
+    instances.forEach(({ glyphCount }, i) => {
+      this.instancesLengthsCache[i] = glyphCount
       this.instancesOffsetsCache[i] = offsetSoFar
-      offsetSoFar += t.length
+      offsetSoFar += glyphCount
     })
     const totalGlyphsLength = offsetSoFar
 
-    const indices = createIndices([], {
-      clockwise: true,
-      type: 'uint16',
-      count: totalGlyphsLength,
+    // Instances move inside the shared buffers, so no applied matrix still holds
+    this.appliedTransforms = []
+
+    // The index and the buffer sizes follow from the glyph count. While it stays the same, refill the
+    // buffers in place and keep the attributes and the GPU buffers behind them.
+    if (totalGlyphsLength !== this.glyphsTotal) {
+      this.glyphsTotal = totalGlyphsLength
+      this.setIndex(createIndices([], { clockwise: true, type: 'uint16', count: totalGlyphsLength }))
+
+      this.positionsArray = new Float32Array(totalGlyphsLength * 12)
+      this.originalPositionsArray = new Float32Array(totalGlyphsLength * 12)
+      this.centersArray = new Float32Array(totalGlyphsLength * 8)
+      this.uvsArray = new Float32Array(totalGlyphsLength * 8)
+
+      this.positionsAttribute = new BufferAttribute(this.positionsArray, 3)
+      this.setAttribute('position', this.positionsAttribute)
+      this.setAttribute('center', new BufferAttribute(this.centersArray, 2))
+      this.setAttribute('uv', new BufferAttribute(this.uvsArray, 2))
+    }
+
+    instances.forEach((instance, i) => {
+      const offset = this.instancesOffsetsCache[i]
+      this.positionsArray.set(instance.positions, offset * 12)
+      this.centersArray.set(instance.centers, offset * 8)
+      this.uvsArray.set(instance.uvs, offset * 8)
     })
-    this.setIndex(indices)
+    this.originalPositionsArray.set(this.positionsArray)
 
-    const attributes = glyphs.map((glyph) => generateAttributes(glyph, texWidth, texHeight, flipY))
+    for (const name of ['position', 'center', 'uv']) {
+      this.attributes[name].needsUpdate = true
+    }
+  }
 
-    const positionsTotalLength = attributes.reduce((sum, at) => sum + at.positions.length, 0)
-    const centersTotalLength = attributes.reduce((sum, at) => sum + at.centers.length, 0)
-    const uvsTotalLength = attributes.reduce((sum, at) => sum + at.uvs.length, 0)
-
-    const positions = new Float32Array(positionsTotalLength)
-    const centers = new Float32Array(centersTotalLength)
-    const uvs = new Float32Array(uvsTotalLength)
-    let positionsPos = 0
-    let centersPos = 0
-    let uvsPos = 0
-    attributes.forEach((at) => {
-      positions.set(at.positions, positionsPos)
-      positionsPos += at.positions.length
-      centers.set(at.centers, centersPos)
-      centersPos += at.centers.length
-      uvs.set(at.uvs, uvsPos)
-      uvsPos += at.uvs.length
-    })
-
-    this.positionsArray = positions
-    this.originalPositionsArray = new Float32Array(positionsTotalLength)
-    this.originalPositionsArray.set(positions)
-
-    this.positionsAttribute = new BufferAttribute(positions, 3)
-    this.setAttribute('position', this.positionsAttribute)
-    this.setAttribute('center', new BufferAttribute(centers, 2))
-    this.setAttribute('uv', new BufferAttribute(uvs, 2))
+  override dispose() {
+    this.cache.clear()
+    this.appliedTransforms = []
+    this.signature = null
+    super.dispose()
   }
 
   override computeBoundingSphere() {
